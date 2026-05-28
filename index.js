@@ -23,7 +23,8 @@ const translations = {
   'grand final': '总决赛',
   'wildcard': '外卡赛',
 
-  // 赛事名称
+  // 赛事名称 - 先翻译长的
+  'masters london': '大师赛伦敦',
   'masters': '大师赛',
   'championship': '冠军赛',
   'stage': '阶段',
@@ -35,6 +36,16 @@ const translations = {
   'emea': '欧洲/中东/非洲赛区',
   'pacific': '太平洋赛区',
   'international': '国际',
+
+  // 地点
+  'london': '伦敦',
+  'sao paulo': '圣保罗',
+  'seoul': '首尔',
+  'tokyo': '东京',
+  'berlin': '柏林',
+  'paris': '巴黎',
+  'singapore': '新加坡',
+  'bangkok': '曼谷',
 
   // 赛事相关
   'vs': '对阵',
@@ -67,8 +78,8 @@ const translations = {
   'secured': '锁定',
   'slot': '席位',
   'berth': '参赛资格',
-  'london': '伦敦',
-  'masters london': '大师赛伦敦',
+  'draw': '抽签',
+  'drawn': '抽签',
 }
 
 // 翻译函数 - 保留队伍名称，只翻译完整单词
@@ -170,7 +181,15 @@ function parseScheduleFromRSS(items) {
     // 从标题和描述中提取队伍信息
     // 格式: "Team A vs Team B" 或 "Team A takes down Team B"
     const vsMatch = title.match(/^(.+?)\s+(?:vs\.?|takes down|defeats|prevails over)\s+(.+?)(?:\s+to|\s+in|\s+-$|$)/i)
-    const scoreMatch = description.match(/(\d+)-\d+\s+(?:in|to)/) || title.match(/\d+-\d+/)
+
+    // 提取比分: "3-2 to win" or "3-2 earn" pattern - 比分格式是 "胜者分数-败者分数"
+    const scoreMatch = description.match(/(\d+)-(\d+)\s+(?:to|in|earn|win)/) || title.match(/(\d+)-(\d+)\s+(?:to|in)/)
+    let score = null
+    if (scoreMatch) {
+      const winnerScore = parseInt(scoreMatch[1])
+      const loserScore = parseInt(scoreMatch[2])
+      score = [winnerScore, loserScore]
+    }
 
     if (vsMatch || title.toLowerCase().includes('match') || title.toLowerCase().includes('stage') || title.toLowerCase().includes('final')) {
       // 保留队伍名称，只翻译其他部分
@@ -179,6 +198,9 @@ function parseScheduleFromRSS(items) {
 
       // 解析时间
       const times = parseMatchTime(item.pubDate, description)
+
+      // 判断是否有实际比赛（通过描述判断是否有赛果）
+      const hasResult = description.match(/\d+-\d+\s+(?:to|in|earn|win|defeat|beat)/i) !== null
 
       const match = {
         id: `match-${index}`,
@@ -193,8 +215,8 @@ function parseScheduleFromRSS(items) {
           { name: vsMatch[1].trim(), shortName: vsMatch[1].trim().substring(0, 3).toUpperCase() },
           { name: vsMatch[2].trim(), shortName: vsMatch[2].trim().substring(0, 3).toUpperCase() }
         ] : null,
-        // 提取比分
-        score: scoreMatch ? [parseInt(scoreMatch[1]), 0] : null,
+        // 提取比分 - 只有当有实际赛果时才显示比分
+        score: hasResult ? score : null,
         // 从描述提取赛制
         format: description.includes('BO5') ? 'BO5' : description.includes('BO3') ? 'BO3' : 'BO3',
         formatText: description.includes('BO5') ? '五局三胜' : '三局两胜',
@@ -205,6 +227,8 @@ function parseScheduleFromRSS(items) {
                   title.toLowerCase().includes('group') || translatedTitle.includes('小组赛') ? 'group' : 'match',
         // 时间信息
         times: times,
+        // 是否有实际比赛结果
+        hasResult: hasResult,
       }
       schedule.push(match)
     }
