@@ -22,6 +22,111 @@ function parseRSS(xml) {
   });
 }
 
+// 从 RSS 解析赛程数据
+function parseScheduleFromRSS(items) {
+  const schedule = []
+  const now = new Date()
+
+  items.forEach((item, index) => {
+    const title = item.title || ''
+    const description = item.description || ''
+
+    // 从标题和描述中提取队伍信息
+    // 格式: "Team A vs Team B" 或 "Team A takes down Team B"
+    const vsMatch = title.match(/^(.+?)\s+(?:vs\.?|takes down|defeats|prevails over)\s+(.+?)(?:\s+to|\s+in|\s+-$|$)/i)
+    const scoreMatch = description.match(/(\d+)-\d+\s+(?:in|to)/) || title.match(/\d+-\d+/)
+
+    if (vsMatch || title.toLowerCase().includes('match') || title.toLowerCase().includes('stage') || title.toLowerCase().includes('final')) {
+      const match = {
+        id: `match-${index}`,
+        title: title,
+        link: item.link,
+        pubDate: item.pubDate,
+        description: description,
+        // 尝试从标题提取队伍
+        teams: vsMatch ? [
+          { name: vsMatch[1].trim(), shortName: vsMatch[1].trim().substring(0, 3).toUpperCase() },
+          { name: vsMatch[2].trim(), shortName: vsMatch[2].trim().substring(0, 3).toUpperCase() }
+        ] : null,
+        // 提取比分
+        score: scoreMatch ? [parseInt(scoreMatch[1]), 0] : null,
+        // 从描述提取赛制
+        format: description.includes('BO5') ? 'BO5' : description.includes('BO3') ? 'BO3' : 'BO3',
+        // 分类
+        category: title.toLowerCase().includes('final') ? 'final' :
+                  title.toLowerCase().includes('semi') ? 'semifinal' :
+                  title.toLowerCase().includes('quarter') ? 'quarterfinal' :
+                  title.toLowerCase().includes('group') ? 'group' : 'match'
+      }
+      schedule.push(match)
+    }
+  })
+
+  return schedule
+}
+
+// 从 RSS 解析活动数据
+function parseEventsFromRSS(items) {
+  const events = []
+  const now = new Date()
+
+  items.forEach((item, index) => {
+    const title = item.title || ''
+    const description = item.description || ''
+
+    // 国际赛事通常包含赛程和活动信息
+    // 提取包含日期和地点的活动
+    const dateMatch = description.match(/(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d+/i) ||
+                      item.pubDate
+
+    if (dateMatch || title.toLowerCase().includes('event') || title.toLowerCase().includes('tournament') ||
+        title.toLowerCase().includes('masters') || title.toLowerCase().includes('championship') ||
+        title.toLowerCase().includes('stage') || title.toLowerCase().includes('league')) {
+      events.push({
+        id: `event-${index}`,
+        title: title,
+        link: item.link,
+        pubDate: item.pubDate,
+        description: description,
+        // 从描述提取赛事名称
+        eventName: extractEventName(title),
+        location: extractLocation(description),
+        date: dateMatch ? parseDate(dateMatch) : null,
+        category: title.toLowerCase().includes('masters') ? 'masters' :
+                  title.toLowerCase().includes('champions') ? 'champions' :
+                  title.toLowerCase().includes('americas') ? 'americas' :
+                  title.toLowerCase().includes('emea') ? 'emea' :
+                  title.toLowerCase().includes('pacific') ? 'pacific' : 'general'
+      })
+    }
+  })
+
+  return events
+}
+
+function extractEventName(title) {
+  const match = title.match(/(?:Masters|Championship|Stage|Format|VCT)\s+(?:London|São Paulo|Seoul|Tokyo|Berlin|Paris)/i)
+  return match ? match[0] : 'VCT 国际赛事'
+}
+
+function extractLocation(description) {
+  const locations = ['London', 'São Paulo', 'Seoul', 'Tokyo', 'Berlin', 'Paris', 'Singapore', 'Bangkok']
+  for (const loc of locations) {
+    if (description.includes(loc) || description.includes(loc)) {
+      return loc
+    }
+  }
+  return 'International'
+}
+
+function parseDate(dateStr) {
+  try {
+    return new Date(dateStr).toISOString()
+  } catch {
+    return new Date().toISOString()
+  }
+}
+
 // 生成 RSS 2.0 XML
 function generateRSS(items, title, link, description) {
   const itemsXml = items.map(item => `
@@ -159,9 +264,81 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// /schedule - 赛程数据 JSON
+app.get('/schedule', async (req, res) => {
+  try {
+    console.log('[Schedule] Fetching VLR RSS');
+    const response = await axios.get(VLR_RSS_URL, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/rss+xml, application/xml, text/xml',
+      },
+      timeout: 15000,
+    });
+
+    const parsed = await parseRSS(response.data);
+    const channel = parsed.rss?.channel;
+    if (!channel) {
+      throw new Error('Invalid RSS format: no channel');
+    }
+    let items = channel.item;
+    if (!Array.isArray(items)) {
+      items = [items];
+    }
+
+    const schedule = parseScheduleFromRSS(items);
+
+    res.json({
+      success: true,
+      count: schedule.length,
+      data: schedule
+    });
+  } catch (error) {
+    console.error('[Schedule] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// /events - 活动数据 JSON
+app.get('/events', async (req, res) => {
+  try {
+    console.log('[Events] Fetching VLR RSS');
+    const response = await axios.get(VLR_RSS_URL, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/rss+xml, application/xml, text/xml',
+      },
+      timeout: 15000,
+    });
+
+    const parsed = await parseRSS(response.data);
+    const channel = parsed.rss?.channel;
+    if (!channel) {
+      throw new Error('Invalid RSS format: no channel');
+    }
+    let items = channel.item;
+    if (!Array.isArray(items)) {
+      items = [items];
+    }
+
+    const events = parseEventsFromRSS(items);
+
+    res.json({
+      success: true,
+      count: events.length,
+      data: events
+    });
+  } catch (error) {
+    console.error('[Events] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`WALI RSS server running on port ${PORT}`);
   console.log(`  - VLR RSS: http://localhost:${PORT}/vlr/rss`);
   console.log(`  - VCT RSS: http://localhost:${PORT}/vct/rss`);
+  console.log(`  - Schedule: http://localhost:${PORT}/schedule`);
+  console.log(`  - Events: http://localhost:${PORT}/events`);
   console.log(`  - Health: http://localhost:${PORT}/health`);
 });
