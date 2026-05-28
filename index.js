@@ -9,13 +9,142 @@ const PORT = process.env.PORT || 3000;
 // VLR.gg RSS - 国际赛事资讯
 const VLR_RSS_URL = 'https://www.vlr.gg/rss';
 
-// Supabase 配置
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
-const supabase = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+// 翻译词典
+const translations = {
+  // 赛事类型
+  'match': '比赛',
+  'final': '决赛',
+  'semifinal': '半决赛',
+  'quarterfinal': '四分之一决赛',
+  'group': '小组赛',
+  'playoff': '季后赛',
+  'upper': '胜者组',
+  'lower': '败者组',
+  'grand final': '总决赛',
+  'wildcard': '外卡赛',
 
-// VCT CN API 端点 (待测试)
-const VCT_API_URL = 'https://vct.qq.com/news_list.html?gameId=1000065';
+  // 赛事名称
+  'masters': '大师赛',
+  'championship': '冠军赛',
+  'stage': '阶段',
+  'playoffs': '季后赛',
+  'regular season': '常规赛',
+
+  // 地区
+  'americas': '美洲赛区',
+  'emea': '欧洲/中东/非洲赛区',
+  'pacific': '太平洋赛区',
+  'international': '国际',
+
+  // 赛事相关
+  'vs': '对阵',
+  'takes down': '击败',
+  'defeats': '击败',
+  'prevails over': '战胜',
+  'earns': '获得',
+  'advances': '晋级',
+  'qualifies': '晋级',
+  'reaches': '进入',
+  'stomps': '横扫',
+  'sweeps': '横扫',
+  'outlasts': '苦战晋级',
+  'put away': '战胜',
+
+  // 时间相关
+  'today': '今天',
+  'tomorrow': '明天',
+  'yesterday': '昨天',
+
+  // 格式
+  'bo3': '三局两胜',
+  'bo5': '五局三胜',
+  'maps': '地图',
+
+  // 其他
+  'wins': '获胜',
+  'loses': '落败',
+  'eliminated': '淘汰',
+  'secured': '锁定',
+  'slot': '席位',
+  'berth': '参赛资格',
+}
+
+// 翻译函数 - 保留队伍名称，只翻译完整单词
+function translateToChinese(text) {
+  if (!text) return ''
+
+  let translated = text
+
+  // 按键长度排序（从长到短）避免部分替换
+  const sortedKeys = Object.keys(translations).sort((a, b) => b.length - a.length)
+
+  for (const key of sortedKeys) {
+    // 使用单词边界匹配，确保只翻译完整单词
+    const regex = new RegExp(`\\b${key}\\b`, 'gi')
+    translated = translated.replace(regex, translations[key])
+  }
+
+  return translated
+}
+
+// 解析时间 - 返回当地时间格式和北京时间
+function parseMatchTime(pubDate, description) {
+  const date = new Date(pubDate)
+
+  // 检测赛事地点（伦敦、北京、圣保罗等）
+  const locationMap = {
+    'London': 'Europe/London',
+    'São Paulo': 'America/Sao_Paulo',
+    'Seoul': 'Asia/Seoul',
+    'Tokyo': 'Asia/Tokyo',
+    'Berlin': 'Europe/Berlin',
+    'Paris': 'Europe/Paris',
+    'Singapore': 'Asia/Singapore',
+    'Bangkok': 'Asia/Bangkok',
+    'Shanghai': 'Asia/Shanghai',
+    'Beijing': 'Asia/Shanghai',
+  }
+
+  // 提取地点
+  let localTimeZone = 'UTC' // 默认UTC
+  for (const [loc, tz] of Object.entries(locationMap)) {
+    if (description.includes(loc) || pubDate.includes(loc)) {
+      localTimeZone = tz
+      break
+    }
+  }
+
+  // 当地时间（赛事举办地）
+  const localTimeStr = date.toLocaleString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: localTimeZone
+  })
+
+  // 北京时间 (UTC+8)
+  const beijingTimeStr = date.toLocaleString('zh-CN', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: 'Asia/Shanghai'
+  })
+
+  // 获取时区名称
+  const localTzName = localTimeZone.split('/').pop().replace('_', ' ')
+
+  return {
+    local: localTimeStr,
+    beijing: beijingTimeStr,
+    timezone: localTzName
+  }
+}
 
 // 解析 RSS XML 为 JSON
 function parseRSS(xml) {
@@ -31,7 +160,6 @@ function parseRSS(xml) {
 // 从 RSS 解析赛程数据
 function parseScheduleFromRSS(items) {
   const schedule = []
-  const now = new Date()
 
   items.forEach((item, index) => {
     const title = item.title || ''
@@ -43,13 +171,22 @@ function parseScheduleFromRSS(items) {
     const scoreMatch = description.match(/(\d+)-\d+\s+(?:in|to)/) || title.match(/\d+-\d+/)
 
     if (vsMatch || title.toLowerCase().includes('match') || title.toLowerCase().includes('stage') || title.toLowerCase().includes('final')) {
+      // 保留队伍名称，只翻译其他部分
+      const translatedTitle = translateToChinese(title)
+      const translatedDescription = translateToChinese(description)
+
+      // 解析时间
+      const times = parseMatchTime(item.pubDate, description)
+
       const match = {
         id: `match-${index}`,
-        title: title,
+        title: translatedTitle, // 翻译后的标题
+        originalTitle: title, // 保留原文
         link: item.link,
         pubDate: item.pubDate,
-        description: description,
-        // 尝试从标题提取队伍
+        description: translatedDescription, // 翻译后的描述
+        originalDescription: description, // 保留原文
+        // 队伍名称保持原文
         teams: vsMatch ? [
           { name: vsMatch[1].trim(), shortName: vsMatch[1].trim().substring(0, 3).toUpperCase() },
           { name: vsMatch[2].trim(), shortName: vsMatch[2].trim().substring(0, 3).toUpperCase() }
@@ -58,11 +195,14 @@ function parseScheduleFromRSS(items) {
         score: scoreMatch ? [parseInt(scoreMatch[1]), 0] : null,
         // 从描述提取赛制
         format: description.includes('BO5') ? 'BO5' : description.includes('BO3') ? 'BO3' : 'BO3',
+        formatText: description.includes('BO5') ? '五局三胜' : '三局两胜',
         // 分类
-        category: title.toLowerCase().includes('final') ? 'final' :
-                  title.toLowerCase().includes('semi') ? 'semifinal' :
-                  title.toLowerCase().includes('quarter') ? 'quarterfinal' :
-                  title.toLowerCase().includes('group') ? 'group' : 'match'
+        category: title.toLowerCase().includes('final') || translatedTitle.includes('决赛') ? 'final' :
+                  title.toLowerCase().includes('semi') || translatedTitle.includes('半决赛') ? 'semifinal' :
+                  title.toLowerCase().includes('quarter') || translatedTitle.includes('四分之一决赛') ? 'quarterfinal' :
+                  title.toLowerCase().includes('group') || translatedTitle.includes('小组赛') ? 'group' : 'match',
+        // 时间信息
+        times: times,
       }
       schedule.push(match)
     }
@@ -74,37 +214,41 @@ function parseScheduleFromRSS(items) {
 // 从 RSS 解析活动数据
 function parseEventsFromRSS(items) {
   const events = []
-  const now = new Date()
 
   items.forEach((item, index) => {
     const title = item.title || ''
     const description = item.description || ''
 
-    // 国际赛事通常包含赛程和活动信息
-    // 提取包含日期和地点的活动
-    const dateMatch = description.match(/(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d+/i) ||
-                      item.pubDate
+    // 翻译标题和描述
+    const translatedTitle = translateToChinese(title)
+    const translatedDescription = translateToChinese(description)
+
+    // 解析时间
+    const times = parseMatchTime(item.pubDate, description)
 
     // 提取票务信息
     const ticketMatch = description.match(/(?:ticket|price|cost|buy|¥|\$|USD|EUR)\s*:?\s*([^\s.,]+)/i)
     const hasTicket = ticketMatch || description.toLowerCase().includes('ticket') ||
                       title.toLowerCase().includes('ticket') || description.toLowerCase().includes('buy')
 
-    if (dateMatch || title.toLowerCase().includes('event') || title.toLowerCase().includes('tournament') ||
+    if (title.toLowerCase().includes('event') || title.toLowerCase().includes('tournament') ||
         title.toLowerCase().includes('masters') || title.toLowerCase().includes('championship') ||
         title.toLowerCase().includes('stage') || title.toLowerCase().includes('league')) {
       events.push({
         id: `event-${index}`,
-        title: title,
+        title: translatedTitle, // 翻译后的标题
+        originalTitle: title, // 保留原文
         link: item.link,
         pubDate: item.pubDate,
-        description: description,
+        description: translatedDescription, // 翻译后的描述
+        originalDescription: description, // 保留原文
         // 从描述提取赛事名称
-        eventName: extractEventName(title),
+        eventName: translateToChinese(extractEventName(title)),
         location: extractLocation(description),
-        date: dateMatch ? parseDate(dateMatch) : null,
-        category: title.toLowerCase().includes('masters') ? 'masters' :
-                  title.toLowerCase().includes('champions') ? 'champions' :
+        date: item.pubDate,
+        times: times,
+        category: translatedTitle.includes('大师赛') ? 'masters' :
+                  translatedTitle.includes('冠军赛') ? 'champions' :
                   title.toLowerCase().includes('americas') ? 'americas' :
                   title.toLowerCase().includes('emea') ? 'emea' :
                   title.toLowerCase().includes('pacific') ? 'pacific' : 'general',
