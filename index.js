@@ -67,6 +67,8 @@ const translations = {
   'secured': '锁定',
   'slot': '席位',
   'berth': '参赛资格',
+  'london': '伦敦',
+  'masters london': '大师赛伦敦',
 }
 
 // 翻译函数 - 保留队伍名称，只翻译完整单词
@@ -269,13 +271,23 @@ function extractEventName(title) {
 }
 
 function extractLocation(description) {
-  const locations = ['London', 'São Paulo', 'Seoul', 'Tokyo', 'Berlin', 'Paris', 'Singapore', 'Bangkok']
-  for (const loc of locations) {
-    if (description.includes(loc) || description.includes(loc)) {
-      return loc
+  const locations = {
+    'London': '伦敦',
+    'São Paulo': '圣保罗',
+    'Seoul': '首尔',
+    'Tokyo': '东京',
+    'Berlin': '柏林',
+    'Paris': '巴黎',
+    'Singapore': '新加坡',
+    'Bangkok': '曼谷',
+  }
+
+  for (const [eng, chn] of Object.entries(locations)) {
+    if (description.includes(eng)) {
+      return chn
     }
   }
-  return 'International'
+  return '国际'
 }
 
 function extractTicketPrice(description) {
