@@ -1,12 +1,18 @@
 const axios = require('axios');
 const express = require('express');
 const xml2js = require('xml2js');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // VLR.gg RSS - 国际赛事资讯
 const VLR_RSS_URL = 'https://www.vlr.gg/rss';
+
+// Supabase 配置
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+const supabase = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
 // VCT CN API 端点 (待测试)
 const VCT_API_URL = 'https://vct.qq.com/news_list.html?gameId=1000065';
@@ -79,6 +85,11 @@ function parseEventsFromRSS(items) {
     const dateMatch = description.match(/(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d+/i) ||
                       item.pubDate
 
+    // 提取票务信息
+    const ticketMatch = description.match(/(?:ticket|price|cost|buy|¥|\$|USD|EUR)\s*:?\s*([^\s.,]+)/i)
+    const hasTicket = ticketMatch || description.toLowerCase().includes('ticket') ||
+                      title.toLowerCase().includes('ticket') || description.toLowerCase().includes('buy')
+
     if (dateMatch || title.toLowerCase().includes('event') || title.toLowerCase().includes('tournament') ||
         title.toLowerCase().includes('masters') || title.toLowerCase().includes('championship') ||
         title.toLowerCase().includes('stage') || title.toLowerCase().includes('league')) {
@@ -96,7 +107,11 @@ function parseEventsFromRSS(items) {
                   title.toLowerCase().includes('champions') ? 'champions' :
                   title.toLowerCase().includes('americas') ? 'americas' :
                   title.toLowerCase().includes('emea') ? 'emea' :
-                  title.toLowerCase().includes('pacific') ? 'pacific' : 'general'
+                  title.toLowerCase().includes('pacific') ? 'pacific' : 'general',
+        // 票务信息
+        hasTicket: hasTicket,
+        ticketPrice: extractTicketPrice(description),
+        ticketUrl: description.match(/https?:\/\/[^\s]+(?:ticket|purchase|buy)[^\s]*/i)?.[0] || null,
       })
     }
   })
@@ -117,6 +132,18 @@ function extractLocation(description) {
     }
   }
   return 'International'
+}
+
+function extractTicketPrice(description) {
+  // 提取价格
+  const usdMatch = description.match(/\$[\d,]+(?:\.\d{2})?/)
+  const cnyMatch = description.match(/¥[\d,]+(?:\.\d{2})?/)
+  const eurMatch = description.match(/(?:€|EUR)\s*[\d,]+(?:\.\d{2})?/)
+
+  if (usdMatch) return { amount: usdMatch[0], currency: 'USD' }
+  if (cnyMatch) return { amount: cnyMatch[0], currency: 'CNY' }
+  if (eurMatch) return { amount: eurMatch[0], currency: 'EUR' }
+  return null
 }
 
 function parseDate(dateStr) {
@@ -334,11 +361,108 @@ app.get('/events', async (req, res) => {
   }
 });
 
+// /tickets - 票务信息 (从 Supabase + RSS)
+app.get('/tickets', async (req, res) => {
+  try {
+    console.log('[Tickets] Fetching tickets data');
+
+    // 如果有 Supabase 配置，尝试从 Supabase 获取票务信息
+    let supabaseTickets = [];
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('tickets')
+          .select('*')
+          .order('sale_time', { ascending: true });
+
+        if (!error && data && data.length > 0) {
+          supabaseTickets = data;
+        }
+      } catch (e) {
+        console.log('[Tickets] Supabase fetch skipped:', e.message);
+      }
+    }
+
+    // 如果 Supabase 没有票务信息，从 RSS 提取赛事票务
+    if (supabaseTickets.length === 0) {
+      console.log('[Tickets] Fetching from VLR RSS for ticket info');
+      const response = await axios.get(VLR_RSS_URL, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'application/rss+xml, application/xml, text/xml',
+        },
+        timeout: 15000,
+      });
+
+      const parsed = await parseRSS(response.data);
+      const channel = parsed.rss?.channel;
+      if (!channel) {
+        throw new Error('Invalid RSS format: no channel');
+      }
+      let items = channel.item;
+      if (!Array.isArray(items)) {
+        items = [items];
+      }
+
+      // 过滤包含票务信息或重要赛事的条目
+      const ticketItems = items.filter(item => {
+        const desc = (item.description || '').toLowerCase()
+        const title = (item.title || '').toLowerCase()
+        // 重要赛事（决赛、大师赛、冠军赛等）视为潜在票务
+        const isMajorEvent = title.includes('final') || title.includes('masters') ||
+                            title.includes('championship') || title.includes('grand')
+        // 有价格信息
+        const hasPrice = desc.includes('$') || desc.includes('¥') || desc.includes('eur')
+        // 有购票相关词汇
+        const hasTicket = desc.includes('ticket') || desc.includes('buy') ||
+                         desc.includes('purchase') || desc.includes('register')
+
+        return isMajorEvent || hasPrice || hasTicket
+      }).map((item, index) => {
+        const priceMatch = (item.description || '').match(/(\$[\d,]+(?:\.\d{2})?|¥[\d,]+(?:\.\d{2})?|€[\d,]+(?:\.\d{2})?)/)
+        return {
+          id: `ticket-${index}`,
+          event_name: item.title,
+          venue: extractLocation(item.description || ''),
+          sale_time: item.pubDate,
+          price_range: priceMatch ? priceMatch[0] : '待定',
+          ticket_url: item.link,
+          source: 'vlr',
+        }
+      });
+
+      res.json({
+        success: true,
+        count: ticketItems.length,
+        data: ticketItems
+      });
+    } else {
+      res.json({
+        success: true,
+        count: supabaseTickets.length,
+        data: supabaseTickets.map(t => ({
+          id: t.id,
+          event_name: t.event_name,
+          venue: t.venue,
+          sale_time: t.sale_time,
+          price_range: t.price_range,
+          ticket_url: t.ticket_url,
+          source: 'supabase',
+        }))
+      });
+    }
+  } catch (error) {
+    console.error('[Tickets] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`WALI RSS server running on port ${PORT}`);
   console.log(`  - VLR RSS: http://localhost:${PORT}/vlr/rss`);
   console.log(`  - VCT RSS: http://localhost:${PORT}/vct/rss`);
   console.log(`  - Schedule: http://localhost:${PORT}/schedule`);
   console.log(`  - Events: http://localhost:${PORT}/events`);
+  console.log(`  - Tickets: http://localhost:${PORT}/tickets`);
   console.log(`  - Health: http://localhost:${PORT}/health`);
 });
